@@ -54,7 +54,7 @@ export class LLMGateway {
 
   async call(request: LLMRequest, purpose: string = 'LLM call', role: LLMCallLog['role'] = 'generator'): Promise<LLMResponse> {
     const temperature = request.temperature ?? MODE_TEMPERATURES[this.config.mode] ?? 0.4;
-    const max_tokens = request.max_tokens ?? 16000;
+    const max_tokens = request.max_tokens ?? 32000;
 
     const callNum = this.logger.llmCallStart(this._currentStage, purpose, role);
 

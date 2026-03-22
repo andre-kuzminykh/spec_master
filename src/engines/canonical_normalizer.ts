@@ -149,7 +149,7 @@ SOURCE DOCUMENT:
 ${markdown}`;
 
   const extracted = await llm.callJSON<any>(
-    { system: systemPrompt, prompt: extractionPrompt, max_tokens: 16000 },
+    { system: systemPrompt, prompt: extractionPrompt, max_tokens: 64000 },
     'Extract all product entities into canonical JSON',
     'generator',
   );
