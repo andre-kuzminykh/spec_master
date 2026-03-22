@@ -1,0 +1,28 @@
+{
+  "name": "spec_master",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/cli.js",
+  "bin": {
+    "specmaster": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "specmaster": "node dist/cli.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:34467/git/andre-kuzminykh/spec_master"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/node": "^25.5.0",
+    "@types/uuid": "^10.0.0",
+    "commander": "^14.0.3",
+    "typescript": "^5.9.3",
+    "uuid": "^13.0.0"
+  }
+}
