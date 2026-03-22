@@ -1,10 +1,20 @@
 /**
  * Stage 9 — Cross-validation.
- * Checks consistency across all specification levels.
- * Identifies orphans, conflicts, gaps, and duplicates.
+ *
+ * WHAT IT DOES:
+ *   Checks consistency across ALL specification levels:
+ *   - Coverage: every feature has stories, every story has flows, etc.
+ *   - Orphans: entities not connected to any parent/child.
+ *   - Conflicts: contradictions between levels.
+ *   - Gaps: product goals not covered by any feature.
+ *   - Low confidence: elements needing human review.
+ *   - Release plan coverage: unassigned features.
+ *
+ * LLM CALLS:
+ *   - 1 call — Role: validator — "Check semantic consistency across all spec levels"
  */
 
-import { CanonicalProduct, SourceRef } from '../schemas/canonical';
+import { CanonicalProduct } from '../schemas/canonical';
 import { LLMGateway } from '../utils/llm_gateway';
 
 export interface ValidationIssue {
@@ -39,11 +49,12 @@ export async function crossValidate(
   llm: LLMGateway,
   runId: string,
 ): Promise<CrossValidationResult> {
+  llm.setStage('cross_validate');
+
   const issues: ValidationIssue[] = [];
   const assumptions: string[] = [...product.assumptions];
   const unresolved: string[] = [...product.open_questions];
 
-  // Coverage counters
   let features_with_stories = 0;
   let features_without_stories = 0;
   let stories_with_flows = 0;
@@ -125,7 +136,7 @@ export async function crossValidate(
     }
   }
 
-  // Check for low-confidence elements
+  // Low-confidence elements
   for (const feature of product.features) {
     if (feature.confidence_score < 0.5) {
       unresolved.push(`Feature "${feature.title}" (${feature.feature_id}) has low confidence — needs review`);
@@ -137,7 +148,7 @@ export async function crossValidate(
     }
   }
 
-  // Check release plan coverage
+  // Release plan coverage
   if (product.release_plan.length > 0) {
     const plannedFeatureIds = new Set(product.release_plan.flatMap(r => r.feature_ids));
     for (const feature of product.features) {
@@ -154,7 +165,7 @@ export async function crossValidate(
     }
   }
 
-  // Use LLM for deeper semantic cross-validation
+  // LLM semantic cross-validation
   try {
     const featureSummary = product.features.map(f => ({
       id: f.feature_id,
@@ -163,8 +174,9 @@ export async function crossValidate(
       priority: f.priority,
     }));
 
-    const llmValidation = await llm.callJSON<any>({
-      system: `You are SpecMaster's cross-validator. Check for semantic inconsistencies in a product specification.
+    const llmValidation = await llm.callJSON<any>(
+      {
+        system: `You are SpecMaster's cross-validator. Check for semantic inconsistencies in a product specification.
 
 Look for:
 1. Features that contradict each other
@@ -172,7 +184,7 @@ Look for:
 3. Gaps in the specification that could cause implementation problems
 4. Duplicate or overlapping concepts across different features
 5. Product goals that aren't covered by any feature`,
-      prompt: `Product: ${product.title}
+        prompt: `Product: ${product.title}
 Goals: ${product.goals.join(', ')}
 Non-goals: ${product.non_goals.join(', ')}
 
@@ -192,8 +204,11 @@ Return JSON:
   "additional_assumptions": ["string"],
   "additional_questions": ["string"]
 }`,
-      max_tokens: 3000,
-    });
+        max_tokens: 3000,
+      },
+      'Check semantic consistency across all specification levels',
+      'validator',
+    );
 
     if (llmValidation.semantic_issues) {
       for (const si of llmValidation.semantic_issues) {
@@ -214,7 +229,7 @@ Return JSON:
       unresolved.push(...llmValidation.additional_questions);
     }
   } catch {
-    // Non-critical if LLM validation fails
+    // Non-critical
   }
 
   return {

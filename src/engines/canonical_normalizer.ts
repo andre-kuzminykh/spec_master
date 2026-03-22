@@ -1,7 +1,19 @@
 /**
  * Stage 1 — Canonical extraction/normalization.
- * Extracts all entities from input and rewrites them into canonical JSON.
- * Works for raw, structured, and mixed inputs.
+ *
+ * WHAT IT DOES:
+ *   Takes the raw markdown + detected structure and extracts ALL product entities
+ *   into the canonical JSON schema. This is the critical normalization step —
+ *   everything downstream depends on this output.
+ *
+ *   For structured input: extracts existing features, stories, use cases, FR/NFR
+ *   faithfully and marks them as source_type "explicit".
+ *
+ *   For raw input: derives product structure from unstructured text, marking
+ *   everything as source_type "derived".
+ *
+ * LLM CALLS:
+ *   - 1 call — Role: generator — "Extract all product entities into canonical JSON"
  */
 
 import {
@@ -9,15 +21,11 @@ import {
   DetectedStructure,
   Feature,
   UserStory,
-  UserFlow,
-  UseCase,
-  FunctionalRequirement,
-  NonFunctionalRequirement,
   Persona,
   SourceRef,
 } from '../schemas/canonical';
 import { LLMGateway } from '../utils/llm_gateway';
-import { featureId, storyId, flowId, useCaseId, frId, nfrId, resetCounters } from '../utils/id_generator';
+import { featureId, storyId, resetCounters } from '../utils/id_generator';
 
 function makeSourceRef(stage: string, runId: string, location: string, originalText?: string): SourceRef {
   return { location, original_text: originalText, stage, run_id: runId };
@@ -29,6 +37,7 @@ export async function normalizeToCanonical(
   llm: LLMGateway,
   runId: string,
 ): Promise<CanonicalProduct> {
+  llm.setStage('normalize');
   resetCounters();
 
   const systemPrompt = `You are SpecMaster's canonical normalizer. Your job is to extract ALL product information from a source document and rewrite it into a canonical JSON structure.
@@ -139,11 +148,11 @@ If features are not explicitly listed but can be derived from the text, extract 
 SOURCE DOCUMENT:
 ${markdown}`;
 
-  const extracted = await llm.callJSON<any>({
-    system: systemPrompt,
-    prompt: extractionPrompt,
-    max_tokens: 16000,
-  });
+  const extracted = await llm.callJSON<any>(
+    { system: systemPrompt, prompt: extractionPrompt, max_tokens: 16000 },
+    'Extract all product entities into canonical JSON',
+    'generator',
+  );
 
   // Build canonical product with proper IDs
   const features: Feature[] = (extracted.features || []).map((f: any) => {
@@ -212,7 +221,6 @@ ${markdown}`;
     confidence_score: 0.9,
   };
 
-  // Store extracted but unlinked entities for later stages
   (product as any)._extracted_use_cases = extracted.existing_use_cases || [];
   (product as any)._extracted_fr = extracted.existing_fr || [];
   (product as any)._extracted_nfr = extracted.existing_nfr || [];

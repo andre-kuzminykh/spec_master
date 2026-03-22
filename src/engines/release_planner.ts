@@ -1,6 +1,13 @@
 /**
  * Stage 3 — Release planning.
- * Distributes features across versions: MVP, v1, v2, future.
+ *
+ * WHAT IT DOES:
+ *   Distributes validated features across release versions (MVP, v1, v2, future).
+ *   Respects existing release assignments from the source document.
+ *   Considers dependency chains, priority, and minimum viable product coherence.
+ *
+ * LLM CALLS:
+ *   - 1 call — Role: planner — "Distribute features across release versions"
  */
 
 import { CanonicalProduct, ReleaseVersion } from '../schemas/canonical';
@@ -11,7 +18,8 @@ export async function planReleases(
   llm: LLMGateway,
   runId: string,
 ): Promise<CanonicalProduct> {
-  // If features already have release_target set, use those as hints
+  llm.setStage('releases');
+
   const existingTargets = product.features
     .filter(f => f.release_target)
     .map(f => ({ feature_id: f.feature_id, title: f.title, release_target: f.release_target }));
@@ -24,8 +32,9 @@ export async function planReleases(
     existing_target: f.release_target || null,
   }));
 
-  const plan = await llm.callJSON<any>({
-    system: `You are SpecMaster's release planner. Distribute features across release versions.
+  const plan = await llm.callJSON<any>(
+    {
+      system: `You are SpecMaster's release planner. Distribute features across release versions.
 
 RULES:
 1. Create versions: MVP, v1, v2, future.
@@ -34,7 +43,7 @@ RULES:
 4. "must" priority features go to MVP or v1.
 5. If the source document already assigned features to releases, respect that unless it conflicts with dependencies.
 6. Each version should have a clear rationale.`,
-    prompt: `Product: ${product.title}
+      prompt: `Product: ${product.title}
 Goals: ${product.goals.join(', ')}
 
 Features:
@@ -53,8 +62,11 @@ Return JSON:
     }
   ]
 }`,
-    max_tokens: 4000,
-  });
+      max_tokens: 4000,
+    },
+    'Distribute features across release versions (MVP/v1/v2/future)',
+    'planner',
+  );
 
   product.release_plan = (plan.versions || []).map((v: any) => ({
     version: v.version,
@@ -63,7 +75,6 @@ Return JSON:
     rationale: v.rationale || '',
   } as ReleaseVersion));
 
-  // Update features with release targets
   for (const version of product.release_plan) {
     for (const fId of version.feature_ids) {
       const feature = product.features.find(f => f.feature_id === fId);

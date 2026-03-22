@@ -1,8 +1,18 @@
 /**
  * Stage 2 — Feature analysis.
- * If features exist: validate, normalize, split/merge.
- * If features don't exist: generate them.
- * Uses Generator + Validator pattern.
+ *
+ * WHAT IT DOES:
+ *   If features already exist in canonical model: validates quality,
+ *   splits overly broad features, merges overlapping ones, renames/reclassifies.
+ *   If no features exist: generates them from product context.
+ *
+ *   Uses Generator + Validator pattern (two separate LLM passes).
+ *
+ * LLM CALLS:
+ *   - If features exist:  1 call (validator)
+ *   - If no features:     2 calls (generator + validator)
+ *   - Generator role: "Generate features from product description"
+ *   - Validator role: "Validate feature quality, check splits/merges/overlaps"
  */
 
 import { CanonicalProduct, Feature, SourceRef } from '../schemas/canonical';
@@ -19,15 +29,13 @@ export async function processFeatures(
   llm: LLMGateway,
   runId: string,
 ): Promise<CanonicalProduct> {
+  llm.setStage('features');
   const hasFeatures = product.features.length > 0;
 
   if (hasFeatures) {
-    // Validate existing features
     product = await validateFeatures(product, llm, runId);
   } else {
-    // Generate features from product context
     product = await generateFeatures(product, rawMarkdown, llm, runId);
-    // Then validate generated features
     product = await validateFeatures(product, llm, runId);
   }
 
@@ -40,18 +48,17 @@ async function generateFeatures(
   llm: LLMGateway,
   runId: string,
 ): Promise<CanonicalProduct> {
-  const systemPrompt = `You are SpecMaster's feature generator. Given a product description, extract or derive the core features.
+  const features = await llm.callJSON<any[]>(
+    {
+      system: `You are SpecMaster's feature generator. Given a product description, extract or derive the core features.
 
 RULES:
 1. A feature is a distinct product capability that delivers user or business value.
 2. Features should be at the right granularity - not too broad (an entire product) and not too narrow (a single button).
 3. A feature is NOT a user story, use case, UI element, or cross-cutting concern.
 4. Each feature should have clear business and user value.
-5. Mark each feature's source_type as "derived" since you are inferring them.`;
-
-  const features = await llm.callJSON<any[]>({
-    system: systemPrompt,
-    prompt: `Based on this product specification, generate a comprehensive list of features.
+5. Mark each feature's source_type as "derived" since you are inferring them.`,
+      prompt: `Based on this product specification, generate a comprehensive list of features.
 
 Product: ${product.title}
 Summary: ${product.summary}
@@ -71,8 +78,11 @@ Return a JSON array of features:
   "priority": "must|should|could|wont",
   "dependencies": ["feature title if dependent"]
 }]`,
-    max_tokens: 8000,
-  });
+      max_tokens: 8000,
+    },
+    'Generate features from product description',
+    'generator',
+  );
 
   product.features = features.map((f: any) => ({
     feature_id: featureId(),
@@ -107,8 +117,9 @@ async function validateFeatures(
     priority: f.priority,
   }));
 
-  const validation = await llm.callJSON<any>({
-    system: `You are SpecMaster's feature validator. Review features for quality issues.
+  const validation = await llm.callJSON<any>(
+    {
+      system: `You are SpecMaster's feature validator. Review features for quality issues.
 
 Check each feature:
 1. Is it truly a product capability (not a user story, use case, or UI element)?
@@ -116,7 +127,7 @@ Check each feature:
 3. Does it overlap with other features?
 4. Does it have clear value?
 5. Should any features be split, merged, renamed, or reclassified?`,
-    prompt: `Product: ${product.title}
+      prompt: `Product: ${product.title}
 Goals: ${product.goals.join(', ')}
 
 Features to validate:
@@ -147,8 +158,11 @@ Return JSON:
     }
   ]
 }`,
-    max_tokens: 4000,
-  });
+      max_tokens: 4000,
+    },
+    'Validate feature quality, check splits/merges/overlaps',
+    'validator',
+  );
 
   // Apply merges
   if (validation.suggested_merges?.length > 0) {

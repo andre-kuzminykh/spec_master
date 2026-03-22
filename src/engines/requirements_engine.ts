@@ -1,6 +1,22 @@
 /**
  * Stages 7 & 8 — Functional and Non-Functional Requirements.
- * Generates or validates FR/NFR from validated use cases.
+ *
+ * WHAT IT DOES:
+ *   For each validated use case, generates or validates requirements.
+ *
+ *   Stage 7 — FR (Functional Requirements):
+ *     System obligations ("The system shall..."). Must be verifiable, unambiguous.
+ *     Not just rephrased stories. Pre-extracted FRs from the source are reused.
+ *
+ *   Stage 8 — NFR (Non-Functional Requirements):
+ *     Quality attributes (performance, security, usability, etc.).
+ *     Must be measurable. Only generated where genuinely relevant.
+ *
+ * LLM CALLS (per use case):
+ *   - FR:  2 calls (generator + validator) or 1 if pre-extracted
+ *   - NFR: 2 calls (generator + validator) or 1 if pre-extracted
+ *   - Generator role: "Generate FR/NFR for use case [name]"
+ *   - Validator role: "Validate FR/NFR quality and measurability"
  */
 
 import {
@@ -22,6 +38,7 @@ export async function processRequirements(
   llm: LLMGateway,
   runId: string,
 ): Promise<CanonicalProduct> {
+  llm.setStage('requirements');
   const extractedFR: any[] = (product as any)._extracted_fr || [];
   const extractedNFR: any[] = (product as any)._extracted_nfr || [];
 
@@ -31,7 +48,6 @@ export async function processRequirements(
         for (const uc of flow.use_cases) {
           // Functional Requirements
           if (uc.functional_requirements.length === 0) {
-            // Check for pre-extracted FRs
             const matchingFR = extractedFR.filter(
               fr => fr.related_feature?.toLowerCase().includes(feature.title.toLowerCase()),
             );
@@ -106,8 +122,9 @@ async function generateFR(
   llm: LLMGateway,
   runId: string,
 ): Promise<FunctionalRequirement[]> {
-  const frs = await llm.callJSON<any[]>({
-    system: `You are SpecMaster's functional requirements generator.
+  const frs = await llm.callJSON<any[]>(
+    {
+      system: `You are SpecMaster's functional requirements generator.
 
 RULES:
 1. Each FR describes a system obligation/behavior.
@@ -115,7 +132,7 @@ RULES:
 3. FRs are NOT just rephrased user stories.
 4. FRs should be specific enough to implement and test.
 5. Avoid vague UI descriptions.`,
-    prompt: `Product: ${product.title}
+      prompt: `Product: ${product.title}
 Feature: ${feature.title}
 Use Case: ${uc.title}
 Given: ${uc.given}
@@ -132,8 +149,11 @@ Return JSON array:
   "priority": "must|should|could|wont",
   "verification_method": "test|inspection|analysis|demonstration"
 }]`,
-    max_tokens: 4000,
-  });
+      max_tokens: 4000,
+    },
+    `Generate functional requirements for use case "${uc.title}"`,
+    'generator',
+  );
 
   return frs.map((fr: any) => ({
     requirement_id: frId(uc.use_case_id),
@@ -159,8 +179,9 @@ async function validateFR(
 ): Promise<FunctionalRequirement[]> {
   if (frs.length === 0) return frs;
 
-  const validation = await llm.callJSON<any>({
-    system: `You are SpecMaster's FR validator. Check functional requirements for quality.
+  const validation = await llm.callJSON<any>(
+    {
+      system: `You are SpecMaster's FR validator. Check functional requirements for quality.
 
 Check each FR:
 1. Describes a system obligation?
@@ -168,7 +189,7 @@ Check each FR:
 3. Is unambiguous?
 4. Not just a rephrased story?
 5. Not too vague?`,
-    prompt: `Use Case: ${uc.title} (${uc.use_case_id})
+      prompt: `Use Case: ${uc.title} (${uc.use_case_id})
 
 FRs to validate:
 ${JSON.stringify(frs.map(f => ({ requirement_id: f.requirement_id, title: f.title, statement: f.statement })), null, 2)}
@@ -178,8 +199,11 @@ Return JSON:
   "valid_ids": ["string"],
   "issues": [{"requirement_id": "string", "issue": "string", "severity": "low|medium|high"}]
 }`,
-    max_tokens: 2000,
-  });
+      max_tokens: 2000,
+    },
+    `Validate functional requirements for use case "${uc.title}"`,
+    'validator',
+  );
 
   if (validation.issues?.length > 0) {
     for (const issue of validation.issues) {
@@ -201,8 +225,9 @@ async function generateNFR(
   llm: LLMGateway,
   runId: string,
 ): Promise<NonFunctionalRequirement[]> {
-  const nfrs = await llm.callJSON<any[]>({
-    system: `You are SpecMaster's non-functional requirements generator.
+  const nfrs = await llm.callJSON<any[]>(
+    {
+      system: `You are SpecMaster's non-functional requirements generator.
 
 RULES:
 1. Each NFR must be relevant to the use case.
@@ -210,7 +235,7 @@ RULES:
 3. Must belong to a standard category: performance, reliability, availability, security, privacy, usability, accessibility, scalability, observability, maintainability, compliance.
 4. Do NOT generate NFRs "for the sake of it" — only where genuinely relevant.
 5. Quality over quantity.`,
-    prompt: `Product: ${product.title}
+      prompt: `Product: ${product.title}
 Feature: ${feature.title}
 Use Case: ${uc.title} — ${uc.description}
 
@@ -225,8 +250,11 @@ Return JSON array:
   "priority": "must|should|could|wont",
   "verification_method": "test|inspection|analysis|demonstration"
 }]`,
-    max_tokens: 4000,
-  });
+      max_tokens: 4000,
+    },
+    `Generate non-functional requirements for use case "${uc.title}"`,
+    'generator',
+  );
 
   return nfrs.map((nfr: any) => ({
     requirement_id: nfrId(uc.use_case_id),
@@ -254,15 +282,16 @@ async function validateNFR(
 ): Promise<NonFunctionalRequirement[]> {
   if (nfrs.length === 0) return nfrs;
 
-  const validation = await llm.callJSON<any>({
-    system: `You are SpecMaster's NFR validator. Check non-functional requirements for quality.
+  const validation = await llm.callJSON<any>(
+    {
+      system: `You are SpecMaster's NFR validator. Check non-functional requirements for quality.
 
 Check each NFR:
 1. Relevant to the use case?
 2. Measurable or verifiable?
 3. Valid category?
 4. Not generated just for completeness?`,
-    prompt: `Use Case: ${uc.title} (${uc.use_case_id})
+      prompt: `Use Case: ${uc.title} (${uc.use_case_id})
 
 NFRs to validate:
 ${JSON.stringify(nfrs.map(n => ({ requirement_id: n.requirement_id, category: n.category, title: n.title, statement: n.statement, measurable_criteria: n.measurable_criteria })), null, 2)}
@@ -272,8 +301,11 @@ Return JSON:
   "valid_ids": ["string"],
   "issues": [{"requirement_id": "string", "issue": "string", "severity": "low|medium|high"}]
 }`,
-    max_tokens: 2000,
-  });
+      max_tokens: 2000,
+    },
+    `Validate non-functional requirements for use case "${uc.title}"`,
+    'validator',
+  );
 
   if (validation.issues?.length > 0) {
     for (const issue of validation.issues) {
