@@ -23,7 +23,7 @@ program
   .argument('<input>', 'Input file path (.md)')
   .option('--out <dir>', 'Output directory', './out')
   .option('--provider <provider>', 'LLM provider (anthropic, openai)', 'openai')
-  .option('--model <model>', 'Model name', 'gpt-4o')
+  .option('--model <model>', 'Model name', 'gpt-5.4')
   .option('--format <format>', 'Output format', 'markdown')
   .option('--mode <mode>', 'Generation mode: strict, balanced, creative', 'balanced')
   .option('--from-stage <stage>', 'Start from this stage')
@@ -86,7 +86,7 @@ for (const [cmdName, stageName] of Object.entries(stageNames)) {
     .argument('<input>', 'Input file (.md or canonical.json)')
     .option('--out <dir>', 'Output directory', './out')
     .option('--provider <provider>', 'LLM provider', 'openai')
-    .option('--model <model>', 'Model name', 'gpt-4o')
+    .option('--model <model>', 'Model name', 'gpt-5.4')
     .option('--mode <mode>', 'Generation mode', 'balanced')
     .action(async (input: string, opts: any) => {
       const inputFile = path.resolve(input);
