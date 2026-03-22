@@ -1,7 +1,17 @@
 /**
  * Stage 6 — Use Cases.
- * Generates or validates use cases from validated user flows.
- * Each use case: Given/When/Then, atomic, testable.
+ *
+ * WHAT IT DOES:
+ *   For each validated user flow, generates or validates use cases.
+ *   Each use case is atomic, testable, and has Given/When/Then structure.
+ *   Pre-extracted use cases from the source document are matched to flows
+ *   and reused instead of regenerated.
+ *
+ * LLM CALLS (per flow):
+ *   - If use cases exist:  1 call (validator)
+ *   - If no use cases:     2 calls (generator + validator)
+ *   - Generator role: "Generate atomic use cases with Given/When/Then for flow [name]"
+ *   - Validator role: "Validate use case atomicity and testability"
  */
 
 import { CanonicalProduct, UseCase, SourceRef } from '../schemas/canonical';
@@ -17,7 +27,7 @@ export async function processUseCases(
   llm: LLMGateway,
   runId: string,
 ): Promise<CanonicalProduct> {
-  // Collect any pre-extracted use cases from normalization stage
+  llm.setStage('use_cases');
   const extractedUCs: any[] = (product as any)._extracted_use_cases || [];
 
   for (const feature of product.features) {
@@ -26,7 +36,6 @@ export async function processUseCases(
         if (flow.use_cases.length > 0) {
           flow.use_cases = await validateUseCases(flow.use_cases, flow, llm, runId);
         } else {
-          // Check if there are pre-extracted use cases that match this flow
           const matchingExtracted = extractedUCs.filter(
             uc => uc.related_feature?.toLowerCase().includes(feature.title.toLowerCase()),
           );
@@ -52,7 +61,6 @@ export async function processUseCases(
               functional_requirements: [],
               non_functional_requirements: [],
             }));
-            // Remove used extracted UCs
             for (const m of matchingExtracted) {
               const idx = extractedUCs.indexOf(m);
               if (idx >= 0) extractedUCs.splice(idx, 1);
@@ -78,8 +86,9 @@ async function generateUseCases(
   llm: LLMGateway,
   runId: string,
 ): Promise<UseCase[]> {
-  const useCases = await llm.callJSON<any[]>({
-    system: `You are SpecMaster's use case generator. Create atomic, testable use cases from user flows.
+  const useCases = await llm.callJSON<any[]>(
+    {
+      system: `You are SpecMaster's use case generator. Create atomic, testable use cases from user flows.
 
 RULES:
 1. Each use case must be atomic — one clear action/outcome.
@@ -87,7 +96,7 @@ RULES:
 3. Must be connected to a specific flow.
 4. Include alternate and error cases.
 5. Must NOT be too general or cover multiple unrelated actions.`,
-    prompt: `Product: ${product.title}
+      prompt: `Product: ${product.title}
 Feature: ${feature.title}
 Story: ${story.title} — As a ${story.as_a}, I want ${story.i_want}
 Flow: ${flow.title}
@@ -108,8 +117,11 @@ Return JSON array:
   "alternate_cases": ["string"],
   "error_cases": ["string"]
 }]`,
-    max_tokens: 6000,
-  });
+      max_tokens: 6000,
+    },
+    `Generate atomic use cases (Given/When/Then) for flow "${flow.title}"`,
+    'generator',
+  );
 
   return useCases.map((uc: any) => ({
     use_case_id: useCaseId(flow.flow_id),
@@ -139,8 +151,9 @@ async function validateUseCases(
   llm: LLMGateway,
   runId: string,
 ): Promise<UseCase[]> {
-  const validation = await llm.callJSON<any>({
-    system: `You are SpecMaster's use case validator. Check use cases for quality.
+  const validation = await llm.callJSON<any>(
+    {
+      system: `You are SpecMaster's use case validator. Check use cases for quality.
 
 Check each use case:
 1. Is it atomic (single action/outcome)?
@@ -149,7 +162,7 @@ Check each use case:
 4. Is it linked to the parent flow?
 5. Not too general?
 6. Doesn't cover multiple unrelated actions?`,
-    prompt: `Flow: ${flow.title} (${flow.flow_id})
+      prompt: `Flow: ${flow.title} (${flow.flow_id})
 
 Use cases to validate:
 ${JSON.stringify(useCases.map(uc => ({
@@ -165,8 +178,11 @@ Return JSON:
   "valid_ids": ["string"],
   "issues": [{"use_case_id": "string", "issue": "string", "severity": "low|medium|high"}]
 }`,
-    max_tokens: 2000,
-  });
+      max_tokens: 2000,
+    },
+    `Validate use case quality for flow "${flow.title}"`,
+    'validator',
+  );
 
   if (validation.issues?.length > 0) {
     for (const issue of validation.issues) {

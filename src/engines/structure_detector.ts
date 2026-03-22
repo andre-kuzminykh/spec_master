@@ -1,7 +1,18 @@
 /**
  * Stage 0 — Parse and detect structure.
- * Determines if input is raw idea, structured spec, or mixed.
- * Extracts sections and maps them to canonical fields.
+ *
+ * WHAT IT DOES:
+ *   Reads the input markdown and determines what type of document it is:
+ *   - "raw"        = just an idea, notes, no formal structure
+ *   - "structured" = PRD/BRD with features, stories, use cases, etc.
+ *   - "mixed"      = some sections structured, some free-form
+ *
+ *   Extracts all headings, maps them to canonical fields (features, goals, etc.),
+ *   and reports which spec levels already exist in the source document.
+ *
+ * LLM CALLS:
+ *   - 0 or 1 call (only if heuristics can't confidently determine mode)
+ *   - Role: analyzer — "Determine document structure type"
  */
 
 import { DetectedStructure, DetectedSection, InputMode } from '../schemas/canonical';
@@ -80,14 +91,12 @@ function extractHeadings(markdown: string): HeadingInfo[] {
 
 function mapHeadingToField(heading: string): string | undefined {
   const normalized = heading.toLowerCase()
-    .replace(/^\d+[\.\)]\s*/, '')  // strip leading numbers
-    .replace(/[*_`#]/g, '')       // strip markdown formatting
+    .replace(/^\d+[\.\)]\s*/, '')
+    .replace(/[*_`#]/g, '')
     .trim();
 
-  // Direct match
   if (SECTION_MAPPINGS[normalized]) return SECTION_MAPPINGS[normalized];
 
-  // Partial match
   for (const [key, value] of Object.entries(SECTION_MAPPINGS)) {
     if (normalized.includes(key) || key.includes(normalized)) {
       return value;
@@ -101,10 +110,11 @@ export async function detectStructure(
   llm: LLMGateway,
   runId: string,
 ): Promise<DetectedStructure> {
+  llm.setStage('detect');
+
   const lines = markdown.split('\n');
   const headings = extractHeadings(markdown);
 
-  // Build sections
   const sections: DetectedSection[] = [];
   for (let i = 0; i < headings.length; i++) {
     const start = headings[i].line;
@@ -121,7 +131,6 @@ export async function detectStructure(
     });
   }
 
-  // Determine what exists
   const mappedFields = new Set(sections.map(s => s.mapped_to).filter(Boolean));
 
   const has_features = mappedFields.has('features');
@@ -135,7 +144,6 @@ export async function detectStructure(
   const has_personas = mappedFields.has('personas');
   const has_domain_model = mappedFields.has('domain_model');
 
-  // Determine input mode
   const structuredCount = [
     has_features,
     has_user_stories,
@@ -154,17 +162,21 @@ export async function detectStructure(
     input_mode = 'raw';
   }
 
-  // If heuristics are inconclusive, use LLM for deeper analysis
+  // LLM fallback for ambiguous cases
   if (input_mode === 'raw' && headings.length > 5) {
     try {
-      const llmResult = await llm.callJSON<{ mode: InputMode }>({
-        system: 'You are a document structure analyzer. Determine if this document is a raw idea, a structured specification, or a mix.',
-        prompt: `Analyze this document and determine its structure level.
+      const llmResult = await llm.callJSON<{ mode: InputMode }>(
+        {
+          system: 'You are a document structure analyzer. Determine if this document is a raw idea, a structured specification, or a mix.',
+          prompt: `Analyze this document and determine its structure level.
 Return JSON: { "mode": "raw" | "structured" | "mixed" }
 
 Document (first 3000 chars):
 ${markdown.substring(0, 3000)}`,
-      });
+        },
+        'Determine if document is raw idea, structured spec, or mixed',
+        'analyzer',
+      );
       input_mode = llmResult.mode;
     } catch {
       // Keep heuristic result

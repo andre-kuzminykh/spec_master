@@ -8,6 +8,8 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "jest --verbose",
+    "test:watch": "jest --watch",
     "start": "node dist/cli.js",
     "specmaster": "node dist/cli.js"
   },
@@ -24,5 +26,10 @@
     "commander": "^14.0.3",
     "typescript": "^5.9.3",
     "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.6"
   }
 }

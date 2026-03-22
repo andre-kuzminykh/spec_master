@@ -1,7 +1,9 @@
 /**
  * LLM Gateway — abstraction over LLM providers.
- * Uses Anthropic Claude by default, extensible to other providers.
+ * Tracks every call through the Logger for full transparency.
  */
+
+import { Logger, getLogger, LLMCallLog } from './logger';
 
 export interface LLMRequest {
   system: string;
@@ -31,33 +33,64 @@ const MODE_TEMPERATURES: Record<string, number> = {
 
 export class LLMGateway {
   private config: LLMGatewayConfig;
+  protected logger: Logger;
+  protected _currentStage: string = '';
+  private _callHistory: Array<{ request: LLMRequest; response: LLMResponse; purpose: string }> = [];
 
-  constructor(config: LLMGatewayConfig) {
+  constructor(config: LLMGatewayConfig, logger?: Logger) {
     this.config = config;
+    this.logger = logger || getLogger();
   }
 
-  async call(request: LLMRequest): Promise<LLMResponse> {
+  /** Set current stage name for logging context */
+  setStage(stage: string): void {
+    this._currentStage = stage;
+  }
+
+  /** Get full call history (useful for tests) */
+  getCallHistory(): Array<{ request: LLMRequest; response: LLMResponse; purpose: string }> {
+    return [...this._callHistory];
+  }
+
+  async call(request: LLMRequest, purpose: string = 'LLM call', role: LLMCallLog['role'] = 'generator'): Promise<LLMResponse> {
     const temperature = request.temperature ?? MODE_TEMPERATURES[this.config.mode] ?? 0.4;
     const max_tokens = request.max_tokens ?? 16000;
 
-    if (this.config.provider === 'anthropic') {
-      return this.callAnthropic(request, temperature, max_tokens);
-    } else if (this.config.provider === 'openai') {
-      return this.callOpenAI(request, temperature, max_tokens);
+    const callNum = this.logger.llmCallStart(this._currentStage, purpose, role);
+
+    try {
+      let response: LLMResponse;
+
+      if (this.config.provider === 'anthropic') {
+        response = await this.callAnthropic(request, temperature, max_tokens);
+      } else if (this.config.provider === 'openai') {
+        response = await this.callOpenAI(request, temperature, max_tokens);
+      } else {
+        throw new Error(`Unsupported provider: ${this.config.provider}`);
+      }
+
+      this.logger.llmCallEnd(callNum, response.usage?.input_tokens, response.usage?.output_tokens);
+      this._callHistory.push({ request, response, purpose });
+      return response;
+    } catch (error: any) {
+      this.logger.llmCallFail(callNum, error.message);
+      throw error;
     }
-    throw new Error(`Unsupported provider: ${this.config.provider}`);
   }
 
-  async callJSON<T>(request: LLMRequest): Promise<T> {
-    const response = await this.call({
-      ...request,
-      prompt: request.prompt + '\n\nRespond ONLY with valid JSON. No markdown fences, no explanation.',
-    });
+  async callJSON<T>(request: LLMRequest, purpose: string = 'LLM JSON call', role: LLMCallLog['role'] = 'generator'): Promise<T> {
+    const response = await this.call(
+      {
+        ...request,
+        prompt: request.prompt + '\n\nRespond ONLY with valid JSON. No markdown fences, no explanation.',
+      },
+      purpose,
+      role,
+    );
     return this.parseJSON<T>(response.content);
   }
 
   private parseJSON<T>(content: string): T {
-    // Strip markdown fences if present
     let cleaned = content.trim();
     if (cleaned.startsWith('```')) {
       cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
@@ -65,7 +98,6 @@ export class LLMGateway {
     try {
       return JSON.parse(cleaned) as T;
     } catch {
-      // Try to find JSON in the content
       const match = cleaned.match(/\{[\s\S]*\}/);
       if (match) {
         return JSON.parse(match[0]) as T;
@@ -124,7 +156,7 @@ export class LLMGateway {
       },
       body: JSON.stringify({
         model: this.config.model,
-        max_tokens,
+        max_completion_tokens: max_tokens,
         temperature,
         messages: [
           { role: 'system', content: request.system },

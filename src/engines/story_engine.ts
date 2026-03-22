@@ -1,8 +1,17 @@
 /**
  * Stage 4 — User Stories.
- * If stories exist: extract, rewrite to As a/I want/So that, validate.
- * If not: generate from validated features.
- * Generator + Validator pattern.
+ *
+ * WHAT IT DOES:
+ *   For each validated feature, generates or validates user stories.
+ *   Stories follow the "As a [actor], I want [goal], so that [value]" format.
+ *   If stories already exist from the source document, they are validated
+ *   and deduplicated, not regenerated.
+ *
+ * LLM CALLS (per feature):
+ *   - If stories exist:  1 call (validator)
+ *   - If no stories:     2 calls (generator + validator)
+ *   - Generator role: "Generate user stories for feature [name]"
+ *   - Validator role: "Validate story quality, check duplicates"
  */
 
 import { CanonicalProduct, UserStory, SourceRef } from '../schemas/canonical';
@@ -19,14 +28,13 @@ export async function processStories(
   llm: LLMGateway,
   runId: string,
 ): Promise<CanonicalProduct> {
+  llm.setStage('stories');
+
   for (const feature of product.features) {
     if (feature.user_stories.length > 0) {
-      // Validate existing stories
       feature.user_stories = await validateStories(feature.user_stories, feature, product, llm, runId);
     } else {
-      // Generate stories for this feature
       feature.user_stories = await generateStories(feature, product, rawMarkdown, llm, runId);
-      // Validate generated stories
       feature.user_stories = await validateStories(feature.user_stories, feature, product, llm, runId);
     }
   }
@@ -41,8 +49,9 @@ async function generateStories(
   llm: LLMGateway,
   runId: string,
 ): Promise<UserStory[]> {
-  const stories = await llm.callJSON<any[]>({
-    system: `You are SpecMaster's user story generator. Create user stories for a specific feature.
+  const stories = await llm.callJSON<any[]>(
+    {
+      system: `You are SpecMaster's user story generator. Create user stories for a specific feature.
 
 RULES:
 1. Each story must follow "As a [actor], I want [goal], so that [value]" format.
@@ -51,7 +60,7 @@ RULES:
 4. Each story should be independently valuable.
 5. Cover the main happy paths and important edge cases.
 6. Use personas from the product specification as actors when available.`,
-    prompt: `Product: ${product.title}
+      prompt: `Product: ${product.title}
 Personas: ${product.personas.map(p => p.name).join(', ') || 'end user'}
 
 Feature: ${feature.title}
@@ -69,8 +78,11 @@ Return JSON array:
   "preconditions": ["string"],
   "postconditions": ["string"]
 }]`,
-    max_tokens: 6000,
-  });
+      max_tokens: 6000,
+    },
+    `Generate user stories for feature "${feature.title}"`,
+    'generator',
+  );
 
   return stories.map((s: any) => ({
     story_id: storyId(feature.feature_id),
@@ -98,8 +110,9 @@ async function validateStories(
   llm: LLMGateway,
   runId: string,
 ): Promise<UserStory[]> {
-  const validation = await llm.callJSON<any>({
-    system: `You are SpecMaster's user story validator. Check stories for quality.
+  const validation = await llm.callJSON<any>(
+    {
+      system: `You are SpecMaster's user story validator. Check stories for quality.
 
 Check each story:
 1. Has a clear actor (as_a)?
@@ -109,7 +122,7 @@ Check each story:
 5. Not too low-level (implementation detail)?
 6. Not actually a use case?
 7. No duplicates with other stories?`,
-    prompt: `Feature: ${feature.title} (${feature.feature_id})
+      prompt: `Feature: ${feature.title} (${feature.feature_id})
 Product: ${product.title}
 
 Stories to validate:
@@ -133,10 +146,12 @@ Return JSON:
   ],
   "duplicates": [["story_id_1", "story_id_2"]]
 }`,
-    max_tokens: 3000,
-  });
+      max_tokens: 3000,
+    },
+    `Validate stories for feature "${feature.title}"`,
+    'validator',
+  );
 
-  // Remove duplicates (keep first)
   if (validation.duplicates?.length > 0) {
     const toRemove = new Set<string>();
     for (const pair of validation.duplicates) {
@@ -145,7 +160,6 @@ Return JSON:
     stories = stories.filter(s => !toRemove.has(s.story_id));
   }
 
-  // Mark issues
   if (validation.issues?.length > 0) {
     for (const issue of validation.issues) {
       const story = stories.find(s => s.story_id === issue.story_id);

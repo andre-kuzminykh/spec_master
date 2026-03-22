@@ -1,10 +1,11 @@
 /**
  * Main pipeline orchestrator.
- * Executes all stages in sequence, respecting --from-stage / --to-stage.
+ * Executes all stages in sequence with detailed logging of every LLM call.
  */
 
 import { CanonicalProduct, DetectedStructure } from './schemas/canonical';
 import { LLMGateway, LLMGatewayConfig } from './utils/llm_gateway';
+import { createLogger } from './utils/logger';
 import { readText } from './utils/file_utils';
 import { detectStructure } from './engines/structure_detector';
 import { normalizeToCanonical } from './engines/canonical_normalizer';
@@ -18,6 +19,56 @@ import { crossValidate, CrossValidationResult } from './engines/cross_validator'
 import { buildTraceabilityMatrix, TraceabilityMatrix } from './engines/traceability_engine';
 import { renderFinalSpecification } from './engines/renderer';
 import { RunManager, STAGES, StageName } from './engines/run_manager';
+
+/** Human-readable description of what each stage does */
+const STAGE_DESCRIPTIONS: Record<string, string> = {
+  detect:
+    'Parses input markdown, extracts headings, maps sections to canonical fields.\n' +
+    '│  Determines mode: raw idea / structured PRD / mixed.\n' +
+    '│  LLM: 0-1 calls (only if heuristics are inconclusive)',
+  normalize:
+    'Extracts ALL product entities (features, stories, use cases, FR/NFR, goals, personas)\n' +
+    '│  from the source document into canonical JSON schema.\n' +
+    '│  Marks each entity as explicit (from doc) or derived (inferred).\n' +
+    '│  LLM: 1 call (generator) — "Extract all entities into canonical JSON"',
+  features:
+    'Validates existing features or generates new ones from product context.\n' +
+    '│  Checks: too broad? too narrow? overlapping? actually a user story?\n' +
+    '│  May split, merge, rename, or reclassify features.\n' +
+    '│  LLM: 1-2 calls (generator + validator)',
+  releases:
+    'Distributes validated features across release versions: MVP, v1, v2, future.\n' +
+    '│  Respects dependency chains, priorities, and existing assignments.\n' +
+    '│  LLM: 1 call (planner)',
+  stories:
+    'For each feature: generates or validates user stories.\n' +
+    '│  Format: "As a [actor], I want [goal], so that [value]".\n' +
+    '│  Checks: has actor? has goal? has value? not a use case? no duplicates?\n' +
+    '│  LLM: 2 calls per feature (generator + validator)',
+  flows:
+    'For each story: generates or validates user flows with Mermaid diagrams.\n' +
+    '│  Each flow has: main path, alternate paths, error paths, entry/exit points.\n' +
+    '│  LLM: 2 calls per story (generator + validator)',
+  use_cases:
+    'For each flow: generates or validates atomic use cases.\n' +
+    '│  Each use case has Given/When/Then for testability.\n' +
+    '│  Pre-extracted use cases from source document are reused, not regenerated.\n' +
+    '│  LLM: 2 calls per flow (generator + validator)',
+  requirements:
+    'For each use case: generates FR (functional) and NFR (non-functional) requirements.\n' +
+    '│  FR: "The system shall..." — verifiable, unambiguous system obligations.\n' +
+    '│  NFR: measurable quality attributes (performance, security, usability, etc.).\n' +
+    '│  LLM: up to 4 calls per use case (FR gen+val, NFR gen+val)',
+  cross_validate:
+    'Checks consistency across ALL specification levels.\n' +
+    '│  Finds: orphans, conflicts, coverage gaps, duplicates, uncovered goals.\n' +
+    '│  Reports low-confidence elements needing human review.\n' +
+    '│  LLM: 1 call (validator) — semantic cross-check',
+  render:
+    'Generates final output files: markdown specification, JSON artifacts,\n' +
+    '│  Mermaid diagrams, traceability matrix, assumptions, unresolved items.\n' +
+    '│  LLM: 0 calls (pure rendering)',
+};
 
 export interface PipelineOptions {
   inputFile: string;
@@ -35,12 +86,15 @@ export interface PipelineOptions {
 }
 
 export async function runPipeline(options: PipelineOptions): Promise<void> {
+  const logger = createLogger();
+  logger.pipelineStart(options.inputFile, options.provider, options.model, options.mode);
+
   const llmConfig: LLMGatewayConfig = {
     provider: options.provider,
     model: options.model,
     mode: options.mode,
   };
-  const llm = new LLMGateway(llmConfig);
+  const llm = new LLMGateway(llmConfig, logger);
 
   let runManager: RunManager;
   let product: CanonicalProduct | null = null;
@@ -49,7 +103,6 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
   if (options.resumeManifest) {
     runManager = RunManager.fromManifest(options.resumeManifest);
     markdown = readText(options.inputFile);
-    // Load existing canonical product if available
     try {
       product = runManager.loadCanonicalProduct();
     } catch {
@@ -68,7 +121,6 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
 
   const runId = runManager.runId;
 
-  // Determine stage range
   const fromIdx = options.fromStage
     ? STAGES.indexOf(options.fromStage as StageName)
     : 0;
@@ -84,16 +136,19 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
   let validationResult: CrossValidationResult | null = null;
   let traceability: TraceabilityMatrix | null = null;
 
+  const totalStages = toIdx - fromIdx + 1;
+  let stageNum = 0;
+
   for (let i = fromIdx; i <= toIdx; i++) {
     const stage = STAGES[i];
+    stageNum++;
 
-    // Skip completed stages on resume
     if (runManager.getStageStatus(stage) === 'completed') {
-      console.log(`  ⟳ Skipping ${stage} (already completed)`);
+      logger.stageSkip(stageNum, totalStages, stage);
       continue;
     }
 
-    console.log(`  ▸ Stage: ${stage}`);
+    logger.stageStart(stageNum, totalStages, stage, STAGE_DESCRIPTIONS[stage] || '');
     runManager.startStage(stage);
 
     try {
@@ -105,7 +160,13 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
             ...runManager.saveDetectedStructure(structure),
           ];
           runManager.completeStage(stage, files);
-          console.log(`    Mode: ${structure.input_mode}`);
+          logger.stageDetail('Input mode', structure.input_mode);
+          logger.stageDetail('Sections found', String(structure.sections.length));
+          logger.stageDetail('Has features', structure.has_features ? 'yes' : 'no');
+          logger.stageDetail('Has stories', structure.has_user_stories ? 'yes' : 'no');
+          logger.stageDetail('Has use cases', structure.has_use_cases ? 'yes' : 'no');
+          logger.stageDetail('Has FR/NFR', `${structure.has_functional_requirements ? 'yes' : 'no'} / ${structure.has_non_functional_requirements ? 'yes' : 'no'}`);
+          logger.stageEnd(stage, `Detected as "${structure.input_mode}" with ${structure.sections.length} sections`);
           break;
         }
 
@@ -116,19 +177,28 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
           product = await normalizeToCanonical(markdown, structure, llm, runId);
           const files = runManager.saveCanonicalProduct(product);
           runManager.completeStage(stage, files);
-          console.log(`    Extracted ${product.features.length} features`);
+          const storyCount = product.features.reduce((a, f) => a + f.user_stories.length, 0);
+          logger.stageDetail('Product', product.title);
+          logger.stageDetail('Features extracted', String(product.features.length));
+          logger.stageDetail('Stories extracted', String(storyCount));
+          logger.stageDetail('Goals', String(product.goals.length));
+          logger.stageDetail('Personas', String(product.personas.length));
+          logger.stageEnd(stage, `Canonical model: ${product.features.length} features, ${storyCount} stories`);
           break;
         }
 
         case 'features': {
           if (!product) product = runManager.loadCanonicalProduct();
+          const beforeCount = product.features.length;
           product = await processFeatures(product, markdown, llm, runId);
           const files = [
             ...runManager.saveCanonicalProduct(product),
             ...runManager.saveFeatures(product),
           ];
           runManager.completeStage(stage, files);
-          console.log(`    Validated ${product.features.length} features`);
+          logger.stageDetail('Before', `${beforeCount} features`);
+          logger.stageDetail('After', `${product.features.length} features`);
+          logger.stageEnd(stage, `${product.features.length} validated features`);
           break;
         }
 
@@ -142,7 +212,10 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
             ...runManager.saveReleases(product),
           ];
           runManager.completeStage(stage, files);
-          console.log(`    Planned ${product.release_plan.length} releases`);
+          for (const r of product.release_plan) {
+            logger.stageDetail(r.version, `${r.feature_ids.length} features`);
+          }
+          logger.stageEnd(stage, `${product.release_plan.length} release versions planned`);
           break;
         }
 
@@ -155,7 +228,10 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
           ];
           runManager.completeStage(stage, files);
           const storyCount = product.features.reduce((acc, f) => acc + f.user_stories.length, 0);
-          console.log(`    Processed ${storyCount} stories`);
+          for (const f of product.features) {
+            logger.stageDetail(f.title, `${f.user_stories.length} stories`);
+          }
+          logger.stageEnd(stage, `${storyCount} user stories across ${product.features.length} features`);
           break;
         }
 
@@ -170,7 +246,7 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
           const flowCount = product.features.reduce(
             (acc, f) => acc + f.user_stories.reduce((a, s) => a + s.user_flows.length, 0), 0,
           );
-          console.log(`    Processed ${flowCount} flows`);
+          logger.stageEnd(stage, `${flowCount} user flows with Mermaid diagrams`);
           break;
         }
 
@@ -187,7 +263,7 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
               (a, s) => a + s.user_flows.reduce((b, fl) => b + fl.use_cases.length, 0), 0,
             ), 0,
           );
-          console.log(`    Processed ${ucCount} use cases`);
+          logger.stageEnd(stage, `${ucCount} atomic use cases (Given/When/Then)`);
           break;
         }
 
@@ -199,6 +275,20 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
             ...runManager.saveRequirements(product),
           ];
           runManager.completeStage(stage, files);
+          let frCount = 0, nfrCount = 0;
+          for (const f of product.features) {
+            for (const s of f.user_stories) {
+              for (const fl of s.user_flows) {
+                for (const uc of fl.use_cases) {
+                  frCount += uc.functional_requirements.length;
+                  nfrCount += uc.non_functional_requirements.length;
+                }
+              }
+            }
+          }
+          logger.stageDetail('Functional', `${frCount} requirements`);
+          logger.stageDetail('Non-functional', `${nfrCount} requirements`);
+          logger.stageEnd(stage, `${frCount} FR + ${nfrCount} NFR = ${frCount + nfrCount} total requirements`);
           break;
         }
 
@@ -208,7 +298,13 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
           traceability = buildTraceabilityMatrix(product);
           const files = runManager.saveTraceability(traceability, validationResult);
           runManager.completeStage(stage, files);
-          console.log(`    Found ${validationResult.issues.length} issues`);
+          const c = validationResult.coverage;
+          logger.stageDetail('Features covered', `${c.features_with_stories}/${c.features_with_stories + c.features_without_stories}`);
+          logger.stageDetail('Stories covered', `${c.stories_with_flows}/${c.stories_with_flows + c.stories_without_flows}`);
+          logger.stageDetail('Issues found', String(validationResult.issues.length));
+          logger.stageDetail('Assumptions', String(validationResult.assumptions.length));
+          logger.stageDetail('Open questions', String(validationResult.unresolved_items.length));
+          logger.stageEnd(stage, `${validationResult.issues.length} issues, ${traceability.entries.length} trace entries`);
           break;
         }
 
@@ -222,20 +318,16 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
           }
           const finalMd = renderFinalSpecification(product, traceability, validationResult);
           const files = runManager.saveFinalSpec(finalMd);
-          // Save final canonical product
           runManager.saveCanonicalProduct(product);
           runManager.completeStage(stage, files);
+          logger.stageDetail('Output', `${options.outDir}/final_specification.md`);
+          logger.stageEnd(stage, 'All files rendered');
           break;
         }
       }
     } catch (error: any) {
-      console.error(`    ✗ Stage ${stage} failed: ${error.message}`);
+      logger.stageFail(stage, error.message);
       runManager.failStage(stage, error.message);
-
-      if (options.validateOnly) {
-        throw error;
-      }
-      // Save progress and fail gracefully
       if (product) {
         runManager.saveCanonicalProduct(product);
       }
@@ -243,7 +335,6 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
     }
   }
 
-  // Check for low confidence if requested
   if (options.failOnLowConfidence && product) {
     const lowConfFeatures = product.features.filter(f => f.confidence_score < 0.5);
     if (lowConfFeatures.length > 0) {
@@ -253,7 +344,7 @@ export async function runPipeline(options: PipelineOptions): Promise<void> {
   }
 
   runManager.complete();
-  console.log(`\n✓ Pipeline completed. Output: ${options.outDir}`);
+  logger.pipelineEnd(options.outDir);
 }
 
 export async function runValidateOnly(
@@ -262,27 +353,32 @@ export async function runValidateOnly(
   model: string,
   mode: 'strict' | 'balanced' | 'creative',
 ): Promise<void> {
-  const llm = new LLMGateway({ provider, model, mode });
+  const logger = createLogger();
+  const llm = new LLMGateway({ provider, model, mode }, logger);
   const markdown = readText(inputFile);
   const runId = 'validate-' + Date.now();
 
-  console.log('Detecting structure...');
-  const structure = await detectStructure(markdown, llm, runId);
-  console.log(`Input mode: ${structure.input_mode}`);
-  console.log(`Sections found: ${structure.sections.length}`);
-  console.log(`\nDetected levels:`);
-  console.log(`  Features: ${structure.has_features ? '✓' : '✗'}`);
-  console.log(`  User Stories: ${structure.has_user_stories ? '✓' : '✗'}`);
-  console.log(`  User Flows: ${structure.has_user_flows ? '✓' : '✗'}`);
-  console.log(`  Use Cases: ${structure.has_use_cases ? '✓' : '✗'}`);
-  console.log(`  FR: ${structure.has_functional_requirements ? '✓' : '✗'}`);
-  console.log(`  NFR: ${structure.has_non_functional_requirements ? '✓' : '✗'}`);
-  console.log(`  Release Plan: ${structure.has_release_plan ? '✓' : '✗'}`);
+  logger.pipelineStart(inputFile, provider, model, mode);
+  logger.stageStart(1, 1, 'validate', 'Detect document structure without generating specs');
 
-  console.log(`\nSection mapping:`);
+  const structure = await detectStructure(markdown, llm, runId);
+
+  logger.stageDetail('Input mode', structure.input_mode);
+  logger.stageDetail('Sections', String(structure.sections.length));
+  logger.stageDetail('Features', structure.has_features ? 'yes' : 'no');
+  logger.stageDetail('User Stories', structure.has_user_stories ? 'yes' : 'no');
+  logger.stageDetail('User Flows', structure.has_user_flows ? 'yes' : 'no');
+  logger.stageDetail('Use Cases', structure.has_use_cases ? 'yes' : 'no');
+  logger.stageDetail('FR', structure.has_functional_requirements ? 'yes' : 'no');
+  logger.stageDetail('NFR', structure.has_non_functional_requirements ? 'yes' : 'no');
+  logger.stageDetail('Release Plan', structure.has_release_plan ? 'yes' : 'no');
+
+  console.log('');
   for (const s of structure.sections) {
-    console.log(`  "${s.heading}" → ${s.mapped_to || '(unmapped)'}`);
+    logger.stageDetail(`"${s.heading}"`, s.mapped_to || '(unmapped)');
   }
+
+  logger.stageEnd('validate', `${structure.input_mode} mode, ${structure.sections.length} sections`);
 }
 
 export async function runSingleStage(

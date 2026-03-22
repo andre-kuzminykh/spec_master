@@ -1,7 +1,16 @@
 /**
  * Stage 5 — User Flows.
- * Generates or validates user flows from validated user stories.
- * Includes Mermaid diagram generation.
+ *
+ * WHAT IT DOES:
+ *   For each validated user story, generates or validates user flows.
+ *   Each flow describes a concrete step-by-step path: main path, alternate paths,
+ *   error paths. Also generates Mermaid flowchart diagrams.
+ *
+ * LLM CALLS (per story):
+ *   - If flows exist:  1 call (validator)
+ *   - If no flows:     2 calls (generator + validator)
+ *   - Generator role: "Generate user flows + Mermaid diagrams for story [name]"
+ *   - Validator role: "Validate flow completeness and Mermaid syntax"
  */
 
 import { CanonicalProduct, UserFlow, SourceRef } from '../schemas/canonical';
@@ -17,6 +26,8 @@ export async function processFlows(
   llm: LLMGateway,
   runId: string,
 ): Promise<CanonicalProduct> {
+  llm.setStage('flows');
+
   for (const feature of product.features) {
     for (const story of feature.user_stories) {
       if (story.user_flows.length > 0) {
@@ -38,8 +49,9 @@ async function generateFlows(
   llm: LLMGateway,
   runId: string,
 ): Promise<UserFlow[]> {
-  const flows = await llm.callJSON<any[]>({
-    system: `You are SpecMaster's user flow generator. Create user flows for a specific user story.
+  const flows = await llm.callJSON<any[]>(
+    {
+      system: `You are SpecMaster's user flow generator. Create user flows for a specific user story.
 
 RULES:
 1. Each flow describes a concrete sequence of steps the user takes.
@@ -48,7 +60,7 @@ RULES:
 4. Generate a valid Mermaid flowchart for each flow.
 5. Flows should reflect the story, not the implementation.
 6. Usually one main flow per story, sometimes two for complex stories.`,
-    prompt: `Product: ${product.title}
+      prompt: `Product: ${product.title}
 Feature: ${feature.title}
 Story: As a ${story.as_a}, I want ${story.i_want}, so that ${story.so_that}
 
@@ -64,8 +76,11 @@ Return JSON array:
   "exit_points": ["string"],
   "mermaid": "flowchart TD\\n    A[Start] --> B[Step]\\n    B --> C[End]"
 }]`,
-    max_tokens: 6000,
-  });
+      max_tokens: 6000,
+    },
+    `Generate user flows + Mermaid for story "${story.title}"`,
+    'generator',
+  );
 
   return flows.map((f: any) => ({
     flow_id: flowId(story.story_id),
@@ -92,8 +107,9 @@ async function validateFlows(
   llm: LLMGateway,
   runId: string,
 ): Promise<UserFlow[]> {
-  const validation = await llm.callJSON<any>({
-    system: `You are SpecMaster's user flow validator. Check flows for quality.
+  const validation = await llm.callJSON<any>(
+    {
+      system: `You are SpecMaster's user flow validator. Check flows for quality.
 
 Check each flow:
 1. Does it reflect the parent story?
@@ -102,7 +118,7 @@ Check each flow:
 4. Is the Mermaid diagram valid syntax?
 5. No excessive steps?
 6. Not a mix of multiple independent scenarios?`,
-    prompt: `Story: ${story.title} (${story.story_id})
+      prompt: `Story: ${story.title} (${story.story_id})
 
 Flows to validate:
 ${JSON.stringify(flows.map(f => ({
@@ -124,8 +140,11 @@ Return JSON:
     }
   ]
 }`,
-    max_tokens: 2000,
-  });
+      max_tokens: 2000,
+    },
+    `Validate flows for story "${story.title}"`,
+    'validator',
+  );
 
   if (validation.issues?.length > 0) {
     for (const issue of validation.issues) {
