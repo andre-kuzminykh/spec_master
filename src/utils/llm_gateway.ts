@@ -15,6 +15,8 @@ export interface LLMRequest {
 export interface LLMResponse {
   content: string;
   usage?: { input_tokens: number; output_tokens: number };
+  finish_reason?: string;
+  truncated?: boolean;
 }
 
 export interface LLMGatewayConfig {
@@ -54,7 +56,7 @@ export class LLMGateway {
 
   async call(request: LLMRequest, purpose: string = 'LLM call', role: LLMCallLog['role'] = 'generator'): Promise<LLMResponse> {
     const temperature = request.temperature ?? MODE_TEMPERATURES[this.config.mode] ?? 0.4;
-    const max_tokens = request.max_tokens ?? 16000;
+    const max_tokens = request.max_tokens ?? 32000;
 
     const callNum = this.logger.llmCallStart(this._currentStage, purpose, role);
 
@@ -87,6 +89,12 @@ export class LLMGateway {
       purpose,
       role,
     );
+    if (response.truncated) {
+      throw new Error(
+        `LLM response was truncated (finish_reason=length, ${response.usage?.output_tokens} output tokens). ` +
+        `The output exceeded the model's maximum. Consider chunking the input.`
+      );
+    }
     return this.parseJSON<T>(response.content);
   }
 
@@ -137,9 +145,12 @@ export class LLMGateway {
     }
 
     const data = await resp.json() as any;
+    const finish_reason = data.stop_reason ?? undefined;
     return {
       content: data.content?.[0]?.text ?? '',
       usage: data.usage ? { input_tokens: data.usage.input_tokens, output_tokens: data.usage.output_tokens } : undefined,
+      finish_reason,
+      truncated: finish_reason === 'max_tokens',
     };
   }
 
@@ -171,9 +182,12 @@ export class LLMGateway {
     }
 
     const data = await resp.json() as any;
+    const finish_reason = data.choices?.[0]?.finish_reason ?? undefined;
     return {
       content: data.choices?.[0]?.message?.content ?? '',
       usage: data.usage ? { input_tokens: data.usage.prompt_tokens, output_tokens: data.usage.completion_tokens } : undefined,
+      finish_reason,
+      truncated: finish_reason === 'length',
     };
   }
 }
