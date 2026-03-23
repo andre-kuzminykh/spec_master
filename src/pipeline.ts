@@ -30,7 +30,7 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
     'Extracts ALL product entities (features, stories, use cases, FR/NFR, goals, personas)\n' +
     '│  from the source document into canonical JSON schema.\n' +
     '│  Marks each entity as explicit (from doc) or derived (inferred).\n' +
-    '│  LLM: 1 call (generator) — "Extract all entities into canonical JSON"',
+    '│  LLM: 1+ calls (generator) — large docs auto-chunked to avoid truncation',
   features:
     'Validates existing features or generates new ones from product context.\n' +
     '│  Checks: too broad? too narrow? overlapping? actually a user story?\n' +
